@@ -1,4 +1,4 @@
-Here's a silly thing I made with gpt-oss-120B. It embeds an LLM chat into a web page, and has enough script that let's the LLM update the page as you request (HTML, JS, CSS).
+Here's a silly thing I made with gpt-oss-120B. It embeds an LLM chat into a web page, and has enough script that lets the LLM update the page as you request (HTML, JS, CSS).
 
 ![promptpage UI](./screenshot.png)
 
