@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Live‑Add UI Demo (state‑aware + isolated chat)</title>
+<style>
+/* ------------------------------------------------------------------ */
+/* Layout – split screen                                            */
+/* ------------------------------------------------------------------ */
+body, html { margin:0; padding:0; height:100%; font-family:system-ui, sans-serif; }
+#app { display:flex; height:100vh; overflow:hidden; }
+
+/* Demo side – everything the AI can touch */
+#demo-root { flex:1; position:relative; background:#fafafa; padding:1rem; overflow:auto; }
+
+/* Chat side – never touched by the AI */
+#chat { width:320px; border-left:1px solid #ddd; display:flex; flex-direction:column; background:#fff; }
+#messages { flex:1; overflow-y:auto; padding:0.5rem; }
+.msg { margin:0.4rem 0; max-width:90%; }
+.msg.user { text-align:right; }
+.msg.ai   { text-align:left; }
+.msg .bubble { display:inline-block; padding:0.5rem 0.8rem; border-radius:0.8rem; }
+.msg.user .bubble { background:#007bff; color:#fff; }
+.msg.ai .bubble   { background:#e5e5e5; color:#000; }
+#inputForm { display:flex; border-top:1px solid #ddd; }
+#input { flex:1; padding:0.6rem; border:none; outline:none; }
+#sendBtn { padding:0.6rem 1rem; border:none; background:#007bff; color:#fff; cursor:pointer; }
+
+/* ------------------------------------------------------------------ */
+/* Placeholder for the AI‑generated CSS – we keep the element empty      */
+/* ------------------------------------------------------------------ */
+</style>
+
+<!-- THE ONLY REQUIRED STYLE TAG THAT WILL BE POPULATED BY JS -->
+<style id="demo-style"></style>
+</head>
+<body>
+
+<div id="app">
+  <!-- Demo area – everything the AI can modify -->
+  <div id="demo-root"></div>
+
+  <!-- Chat UI – never touched by the AI -->
+  <div id="chat">
+    <div id="messages"></div>
+    <form id="inputForm">
+      <input id="input" placeholder="Ask me to add / change something…" autocomplete="off" />
+      <button id="sendBtn" type="submit">▶</button>
+    </form>
+  </div>
+</div>
+
+<script>
+/* ------------------------------------------------------------------ */
+/* 1️⃣ GLOBAL STATE                                                   */
+/* ------------------------------------------------------------------ */
+let demoHTML = "";          // what is currently rendered inside #demo-root
+let demoCSS  = "";          // the CSS that currently styles #demo-root
+let userHistory = [];       // array of every user prompt we have sent
+
+/* ------------------------------------------------------------------ */
+/* 2️⃣ Helper – add a chat bubble                                      */
+/* ------------------------------------------------------------------ */
+function addBubble(text, from) {
+  const container = document.createElement('div');
+  container.className = `msg ${from}`;
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  bubble.textContent = text;
+  container.appendChild(bubble);
+  document.getElementById('messages').appendChild(container);
+  container.scrollIntoView({ behavior: 'smooth' });
+}
+
+/* ------------------------------------------------------------------ */
+/* 3️⃣ Scope CSS to #demo-root                                         */
+/* ------------------------------------------------------------------ */
+function scopeCSS(css) {
+  const blocks = css.split(/\}\w*/);
+  const scoped = blocks.map(block => {
+    const [selectorPart, ...rest] = block.split('{');
+    if (!selectorPart?.trim()) return '';
+    const selector = selectorPart.trim();
+
+    // @‑rules handling (media queries, keyframes, etc.)
+    if (selector.startsWith('@')) {
+      if (selector.startsWith('@media')) {
+        const inner = rest.join('{');
+        const scopedInner = scopeCSS(inner);
+        return `${selector}{${scopedInner}}`;
+      }
+      // other at‑rules (font‑face, keyframes) are left untouched
+      return `${selector}{${rest.join('{')}}`;
+    }
+
+    const prefixed = selector
+      .split(',')
+      .map(s => s.trim())
+      .map(s => (s.startsWith('#demo-root') ? s : `#demo-root ${s}`))
+      .join(', ');
+    const declarations = rest.join('{');
+    return `${prefixed}{${declarations}`;
+  });
+  return scoped.join('}\n');
+}
+
+/* ------------------------------------------------------------------ */
+/* 4️⃣ Apply the AI reply (replace HTML + CSS)                         */
+/* ------------------------------------------------------------------ */
+function applyReply(reply) {
+  const codeBlocks = [...reply.matchAll(/```(html|css)?\s*([\s\S]*?)```/gi)];
+  if (codeBlocks.length === 0) return; // nothing to apply
+
+  let newHTML = "";
+  let newCSS  = "";
+  let htmlChanged = false;
+  let cssChanged = false;
+
+  for (const [, lang, code] of codeBlocks) {
+    const normalized = (lang || "").trim().toLowerCase();
+    if (normalized === "html") {
+      newHTML += code + "\n";
+      htmlChanged = true;
+    }
+    else if (normalized === "css") {
+      newCSS += code + "\n";
+      cssChanged = true;
+    }
+    else {
+      if (code.includes("<") && code.includes(">")) {
+        newHTML += code + "\n";
+        htmlChanged = true;
+      } else {
+        newCSS += code + "\n";
+        cssChanged = true;
+      }
+    }
+  }
+
+  // Update the global buffers
+  demoHTML = newHTML.trim();
+  demoCSS  = newCSS.trim();
+
+  // Render HTML
+  if (htmlChanged) {
+    const root = document.getElementById('demo-root');
+    root.innerHTML = demoHTML;    
+  }
+
+  if (cssChanged) {
+    let styleTag = document.getElementById('demo-style');
+    if (styleTag) {
+      styleTag.remove()
+    }
+    
+    styleTag = document.createElement('style');
+    styleTag.id = 'demo-style';
+    styleTag.textContent = scopeCSS(demoCSS);
+    document.head.appendChild(styleTag);
+    const sheet = new CSSStyleSheet();
+    sheet.replaceSync(demoCSS);
+    document.adoptedStyleSheets = [sheet];
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* 5️⃣ Main chat handler – sends prompt + current state + history      */
+/* ------------------------------------------------------------------ */
+document.getElementById('inputForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  const inputEl = document.getElementById('input');
+  const prompt = inputEl.value.trim();
+  if (!prompt) return;
+  inputEl.value = "";
+
+  // Show the user message in the UI
+  addBubble(prompt, 'user');
+
+  // Build the request payload
+  const payload = {
+    prompt,                     // the *new* request
+    history: userHistory.slice(-10), // keep only the last 10 prompts (adjust as you like)
+    state: {
+      html: demoHTML,
+      css: demoCSS
+    }
+  };
+
+  // Store the prompt in the history (will be sent on the next request)
+  userHistory.push(prompt);
+
+  try {
+    const resp = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await resp.json();
+    const reply = data.reply ?? "⚠️ No reply";
+    addBubble(reply, 'ai');
+    applyReply(reply);
+  } catch (err) {
+    console.error(err);
+    addBubble('❌ Request failed', 'ai');
+  }
+});
+</script>
+</body>
+</html>
