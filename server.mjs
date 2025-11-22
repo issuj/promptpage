@@ -32,7 +32,9 @@ const MODEL = "gpt-4o-mini";
 function buildMessages({ history = [], state = {} }) {
   const msgs = [];
 
-  // 1️⃣ System message that tells the model the *current* page state
+  // ----------------------------------------------------------------
+  // 1️⃣ System message – tells the model what it can modify
+  // ----------------------------------------------------------------
   const system = `
 You are a front‑end assistant. The user is editing a web page.
 The HTML you're working on is placed inside the the #demo-root element of a following structure
@@ -42,24 +44,32 @@ The HTML you're working on is placed inside the the #demo-root element of a foll
  <head>
   <meta charset="UTF-8">
   <title>WIP</title>
-  <style id="demo-style">
-  /* CSS you return is placed here (and to document.adoptedStyleSheets) */
-  </style>
+  <style id="demo-style">/* CSS you return is placed here (and to document.adoptedStyleSheets) */</style>
  </head>
- <body>
-  <div id="app">
-   <div id="demo-root">
-    <!-- Demo area – HTML you return is placed here -->
-   </div>
-   <!-- Other things you don't need to care about -->
-  </div>
- </body>
+ <body id="demo-root"><!-- Demo area – HTML you return is placed here --></body>
 </html>
 \`\`\`
-The HTML content is placed within a div block inside a body, so your response can't use html, head, title, body, etc tags.
-When the user wants you to add CSS to the whole page (like a background), add it to #demo-root instead of html or body.
+The HTML content is placed within a body tag, so your response can't use html, head, title, body, etc tags.
 
-Current HTML (inside #demo-root):
+When you need JavaScript, return it in a fenced block labelled \`js\` (or \`javascript\`).
+
+Only respond with **complete** HTML and/or CSS and/or JS wrapped in fenced code blocks. If you output a block of specific type, it overrides all the previous content of the same type. So additions must also contain all the previous content.
+
+If there's no change to a type of resource, omit any blocks of that type (existing content can/will be cleared by an empty block). E.g. No js change -> don't output a js block.
+
+The user may be requesting things one at a time. Try your best to avoid changing things you're not asked to change.
+`.trim();
+
+  msgs.push({ role: "system", content: system });
+
+  // ----------------------------------------------------------------
+  // 2️⃣ Replay previous user requests (dummy assistant replies)
+  // ----------------------------------------------------------------
+  for (const userPrompt of history) {
+    msgs.push({ role: "user", content: userPrompt });
+    msgs.push({ role: "assistant", content: "Request completed" });
+  }
+  msgs.push({ role: "system", content: `Current HTML (inside #demo-root):
 \`\`\`html
 ${state.html || "<!-- none -->"}
 \`\`\`
@@ -69,22 +79,14 @@ Current CSS (scoped to #demo-root):
 ${state.css || "/* none */"}
 \`\`\`
 
-Only respond with **complete** HTML and/or CSS wrapped in fenced code blocks. Additions must also include the existing content, they replace the old content completely.
-When making only style changes, omit html, when making only HTML changes, omit css.
-`;
-  msgs.push({ role: "system", content: system.trim() });
+Current JavaScript (executed inside the iframe):
+\`\`\`js
+${state.js || "// none"}
+\`\`\``})
 
-  // 2️⃣ Replay the *previous* user requests, each followed by a dummy assistant reply.
-  // This gives the model the same conversation flow it would have seen, but without
-  // sending the real (often large) assistant answers.
-  for (const userPrompt of history) {
-    msgs.push({ role: "user", content: userPrompt });
-    msgs.push({ role: "assistant", content: "Request completed" });
-  }
-
-  // 3️⃣ The *current* user prompt will be appended by the route handler itself.
-  // (see below)
-
+  // ----------------------------------------------------------------
+  // 3️⃣ The current user prompt will be appended by the route handler
+  // ----------------------------------------------------------------
   return msgs;
 }
 
@@ -99,7 +101,9 @@ app.post("/api/chat", async (req, res) => {
   const messages = buildMessages({ history, state });
   messages.push({ role: "user", content: prompt });
 
-  console.info(messages)
+  console.info("=== OpenAI request ===");
+  console.info(messages);
+  console.info("======================");
 
   try {
     const response = await fetch(OPENAI_ENDPOINT, {
@@ -110,9 +114,10 @@ app.post("/api/chat", async (req, res) => {
       },
       body: JSON.stringify({
         model: MODEL,
-        temperature: 0.7,
+        temperature: 0.8,
         messages,
-        stream: false
+        stream: false,
+        reasoning_format: "auto",
       })
     });
 

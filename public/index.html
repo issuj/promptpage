@@ -11,7 +11,7 @@ body, html { margin:0; padding:0; height:100%; font-family:system-ui, sans-serif
 #app { display:flex; height:100vh; overflow:hidden; }
 
 /* Demo side – everything the AI can touch */
-#demo-root { flex:1; position:relative; background:#fafafa; padding:1rem; overflow:auto; }
+#demo-root { margin: 0; padding: 0; flex: 1; position: relative; background: #fff; overflow: hidden; }
 
 /* Chat side – never touched by the AI */
 #chat { width:320px; border-left:1px solid #ddd; display:flex; flex-direction:column; background:#fff; }
@@ -51,16 +51,17 @@ body, html { margin:0; padding:0; height:100%; font-family:system-ui, sans-serif
 </div>
 
 <script>
-/* ------------------------------------------------------------------ */
-/* 1️⃣ GLOBAL STATE                                                   */
-/* ------------------------------------------------------------------ */
-let demoHTML = "";          // what is currently rendered inside #demo-root
-let demoCSS  = "";          // the CSS that currently styles #demo-root
-let userHistory = [];       // array of every user prompt we have sent
+/* ============================================================= */
+/* 1️⃣ GLOBAL STATE                                               */
+/* ============================================================= */
+let demoHTML = "";          // current HTML (inside #demo-root)
+let demoCSS  = "";          // current CSS (scoped to #demo-root)
+let demoJS   = "";          // current JavaScript (will run in iframe)
+let userHistory = [];       // list of user prompts (sent to the model)
 
-/* ------------------------------------------------------------------ */
-/* 2️⃣ Helper – add a chat bubble                                      */
-/* ------------------------------------------------------------------ */
+/* ============================================================= */
+/* 2️⃣ Helper – add a chat bubble                                 */
+/* ============================================================= */
 function addBubble(text, from) {
   const container = document.createElement('div');
   container.className = `msg ${from}`;
@@ -72,64 +73,58 @@ function addBubble(text, from) {
   container.scrollIntoView({ behavior: 'smooth' });
 }
 
-/* ------------------------------------------------------------------ */
-/* 3️⃣ Scope CSS to #demo-root                                         */
-/* ------------------------------------------------------------------ */
-function scopeCSS(css) {
-  const blocks = css.split(/\}\w*/);
-  const scoped = blocks.map(block => {
-    const [selectorPart, ...rest] = block.split('{');
-    if (!selectorPart?.trim()) return '';
-    const selector = selectorPart.trim();
-
-    // @‑rules handling (media queries, keyframes, etc.)
-    if (selector.startsWith('@')) {
-      if (selector.startsWith('@media')) {
-        const inner = rest.join('{');
-        const scopedInner = scopeCSS(inner);
-        return `${selector}{${scopedInner}}`;
-      }
-      // other at‑rules (font‑face, keyframes) are left untouched
-      return `${selector}{${rest.join('{')}}`;
-    }
-
-    const prefixed = selector
-      .split(',')
-      .map(s => s.trim())
-      .map(s => (s.startsWith('#demo-root') ? s : `#demo-root ${s}`))
-      .join(', ');
-    const declarations = rest.join('{');
-    return `${prefixed}{${declarations}`;
-  });
-  return scoped.join('}\n');
+/* ============================================================= */
+/* 4️⃣ Build the demo iframe content (HTML + CSS + JS)            */
+/* ============================================================= */
+function buildIframeSrcDoc() {
+  // The iframe will get a full HTML document.
+  // We put the CSS inside a <style> tag (scoped automatically by our prefixing).
+  // The JS is placed at the end of the body so it runs after the DOM is built.
+  return `
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<title>Demo</title>
+<style>
+${scopeCSS(demoCSS)}
+</style>
+</head>
+<body>
+<div id="demo-root">${demoHTML}</div>
+<scr` + `ipt>${demoJS}</scr` + `ipt></body></html>`.trim();
 }
 
-/* ------------------------------------------------------------------ */
-/* 4️⃣ Apply the AI reply (replace HTML + CSS)                         */
-/* ------------------------------------------------------------------ */
+/* -------------------------------------------------------------- */
+/* 5️⃣ Apply the AI reply (replace HTML, CSS, JS)                  */
+/* -------------------------------------------------------------- */
 function applyReply(reply) {
-  const codeBlocks = [...reply.matchAll(/```(html|css)?\s*([\s\S]*?)```/gi)];
+  const codeBlocks = [...reply.matchAll(/```(html|css|js|javascript)?\s*([\s\S]*?)```/gi)];
   if (codeBlocks.length === 0) return; // nothing to apply
 
   let newHTML = "";
   let newCSS  = "";
-  let htmlChanged = false;
-  let cssChanged = false;
+  let newJS   = "";
+  let htmlChanged = false,
+      cssChanged  = false,
+      jsChanged   = false;
 
   for (const [, lang, code] of codeBlocks) {
     const normalized = (lang || "").trim().toLowerCase();
     if (normalized === "html") {
       newHTML += code + "\n";
       htmlChanged = true;
-    }
-    else if (normalized === "css") {
+    } else if (normalized === "css") {
       newCSS += code + "\n";
       cssChanged = true;
-    }
-    else {
+    } else if (normalized === "js" || normalized === "javascript") {
+      newJS += code + "\n";
+      jsChanged = true;
+    } else {
+      // fallback guess
       if (code.includes("<") && code.includes(">")) {
         newHTML += code + "\n";
         htmlChanged = true;
+      } else if (/function|document\.|window\./.test(code)) {
+        newJS += code + "\n";
+        jsChanged = true;
       } else {
         newCSS += code + "\n";
         cssChanged = true;
@@ -137,35 +132,59 @@ function applyReply(reply) {
     }
   }
 
-  // Update the global buffers
-  demoHTML = newHTML.trim();
-  demoCSS  = newCSS.trim();
+  // ---- update the global buffers -------------------------------------------------
+  if (htmlChanged) demoHTML = newHTML.trim();
+  if (cssChanged)  demoCSS  = newCSS.trim();
+  if (jsChanged)   demoJS   = newJS.trim();
 
-  // Render HTML
-  if (htmlChanged) {
-    const root = document.getElementById('demo-root');
-    root.innerHTML = demoHTML;    
-  }
+  // ---- Re‑create the sandboxed iframe (this automatically picks up the new CSS) -
+  const oldIframe = document.getElementById('demo-frame');
+  if (oldIframe) oldIframe.remove();          // destroy previous execution context
 
-  if (cssChanged) {
-    let styleTag = document.getElementById('demo-style');
-    if (styleTag) {
-      styleTag.remove()
-    }
-    
-    styleTag = document.createElement('style');
-    styleTag.id = 'demo-style';
-    styleTag.textContent = scopeCSS(demoCSS);
-    document.head.appendChild(styleTag);
-    const sheet = new CSSStyleSheet();
-    sheet.replaceSync(demoCSS);
-    document.adoptedStyleSheets = [sheet];
-  }
+  const iframe = document.createElement('iframe');
+  iframe.id = 'demo-frame';
+  iframe.style.width = '100%';
+  iframe.style.height = '100%';
+  iframe.style.border = 'none';
+  // sandbox: allow scripts + same‑origin (needed for the CSSStyleSheet API if you use it)
+  iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin');
+  iframe.srcdoc = buildIframeSrcDoc();        // <-- builds a full HTML document that includes CSS
+  document.getElementById('demo-root').appendChild(iframe);
 }
 
-/* ------------------------------------------------------------------ */
-/* 5️⃣ Main chat handler – sends prompt + current state + history      */
-/* ------------------------------------------------------------------ */
+/* -------------------------------------------------------------- */
+/* 4️⃣ Build the demo iframe source (HTML + CSS + JS)              */
+/* -------------------------------------------------------------- */
+function buildIframeSrcDoc() {
+  // The CSS is inserted exactly as we received it.
+  // Because the whole page lives inside an iframe, we do NOT need to prefix selectors.
+  // If you *do* want the model’s CSS to be scoped to #demo-root inside the iframe,
+  // keep the `scopeCSS` call – it won’t hurt anything.
+  return `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Demo</title>
+<style>
+${demoCSS}
+</style>
+</head>
+<body>
+<div id="demo-root">
+${demoHTML}
+</div>
+<scr` + `ipt>
+${demoJS}
+</scr` + `ipt>
+</body>
+</html>
+`.trim();
+}
+
+/* ============================================================= */
+/* 6️⃣ Main chat handler – sends prompt + current state + history*/
+/* ============================================================= */
 document.getElementById('inputForm').addEventListener('submit', async e => {
   e.preventDefault();
   const inputEl = document.getElementById('input');
@@ -173,20 +192,21 @@ document.getElementById('inputForm').addEventListener('submit', async e => {
   if (!prompt) return;
   inputEl.value = "";
 
-  // Show the user message in the UI
+  // Show the user message
   addBubble(prompt, 'user');
 
-  // Build the request payload
+  // Build payload for the backend
   const payload = {
-    prompt,                     // the *new* request
-    history: userHistory.slice(-10), // keep only the last 10 prompts (adjust as you like)
+    prompt,
+    history: userHistory.slice(-10), // keep only last 10 prompts
     state: {
       html: demoHTML,
-      css: demoCSS
+      css: demoCSS,
+      js: demoJS
     }
   };
 
-  // Store the prompt in the history (will be sent on the next request)
+  // Add the new prompt to history (will be sent on the *next* request)
   userHistory.push(prompt);
 
   try {
